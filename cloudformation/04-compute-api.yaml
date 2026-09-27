@@ -27,6 +27,13 @@ Parameters:
   pCleanupStaleOrdersCodeKey: { Type: String, Description: "S3 key of cleanup_stale_orders.zip" }
   pProcessOrderImageUri: { Type: String, Description: "ECR image URI for process_order (built via docker/Dockerfile.lambda)" }
 
+  # AWS::ApiGateway::Deployment has no properties that change when a method or
+  # integration is added/edited - CloudFormation sees an unchanged resource and
+  # skips creating a new deployment snapshot, silently leaving the live stage
+  # on stale API config. deploy_stack.sh passes a fresh value here (the git SHA)
+  # on every deploy, forcing a genuine property change every time.
+  pDeploymentTrigger: { Type: String, Default: "manual" }
+
   pOrdersTableName: { Type: String }
   pOrdersQueueUrl: { Type: String }
   pOrdersQueueArn: { Type: String }
@@ -221,6 +228,7 @@ Resources:
     DependsOn: [CreateOrderMethod, CreateOrderOptionsMethod]
     Properties:
       RestApiId: !Ref OrdersApi
+      Description: !Sub "Deployment trigger: ${pDeploymentTrigger}"
 
   OrdersApiStage:
     Type: AWS::ApiGateway::Stage

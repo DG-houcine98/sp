@@ -72,6 +72,15 @@ if [[ -f "${DEPS_FILE}" ]]; then
   done < "${DEPS_FILE}"
 fi
 
+# Force a fresh AWS::ApiGateway::Deployment on every deploy for stacks that
+# declare pDeploymentTrigger (currently only 04-compute-api) - see the comment
+# on that parameter for why this is necessary: without it, adding/editing a
+# method silently doesn't take effect on the live stage.
+if grep -q "pDeploymentTrigger:" "${TEMPLATE_FILE}"; then
+  TRIGGER_VALUE="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || date +%s)"
+  PARAM_OVERRIDES+=("pDeploymentTrigger=${TRIGGER_VALUE}")
+fi
+
 STACK_NAME="order-processing-${ENVIRONMENT}-${STACK_BASENAME}"
 
 run_deploy() {
