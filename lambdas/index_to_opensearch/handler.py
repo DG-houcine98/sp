@@ -9,6 +9,7 @@ Authenticates to OpenSearch via AWSV4SignerAuth using this Lambda's own
 execution-role credentials - no separate OpenSearch username/password to
 store or rotate.
 """
+
 import os
 
 import boto3
@@ -23,7 +24,9 @@ _deserializer = TypeDeserializer()
 
 def _deserialize_image(dynamodb_image):
     """Converts a DynamoDB Stream record image ({"S": "value"} format) to plain Python types."""
-    return {key: _deserializer.deserialize(value) for key, value in dynamodb_image.items()}
+    return {
+        key: _deserializer.deserialize(value) for key, value in dynamodb_image.items()
+    }
 
 
 def _get_opensearch_client():

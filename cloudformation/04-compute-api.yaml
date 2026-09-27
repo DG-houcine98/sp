@@ -70,6 +70,7 @@ Resources:
       Role: !Ref pProcessOrderRoleArn
       Timeout: 30
       MemorySize: 256
+      Architectures: [arm64] # matches the arm64 image package_lambdas.sh builds on Apple Silicon
       Code:
         ImageUri: !Ref pProcessOrderImageUri
       Environment:
@@ -179,6 +180,34 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateOrderFunction.Arn}/invocations"
 
+  # Preflight OPTIONS for the browser-based frontend. Lambda proxy integration
+  # (above) never sees OPTIONS requests handled this way - this is a separate
+  # MOCK integration purely to satisfy the CORS preflight before the browser
+  # sends the actual cross-origin POST.
+  CreateOrderOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersApi
+      ResourceId: !Ref OrdersResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   CreateOrderApiInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -189,7 +218,7 @@ Resources:
 
   OrdersApiDeployment:
     Type: AWS::ApiGateway::Deployment
-    DependsOn: CreateOrderMethod
+    DependsOn: [CreateOrderMethod, CreateOrderOptionsMethod]
     Properties:
       RestApiId: !Ref OrdersApi
 

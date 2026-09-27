@@ -10,6 +10,7 @@ messageIds get redelivered.
 Packaged as a container image (docker/Dockerfile.lambda) rather than a zip,
 to demonstrate that packaging path alongside the zip-based functions.
 """
+
 import json
 import logging
 import os
@@ -63,7 +64,9 @@ def lambda_handler(event, context):
             body = json.loads(record["body"])
             _process_single_order(body["order_id"])
         except Exception:
-            logger.error("Failed to process message %s:\n%s", message_id, traceback.format_exc())
+            logger.error(
+                "Failed to process message %s:\n%s", message_id, traceback.format_exc()
+            )
             batch_item_failures.append({"itemIdentifier": message_id})
 
     return {"batchItemFailures": batch_item_failures}

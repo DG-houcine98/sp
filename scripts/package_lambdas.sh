@@ -74,11 +74,20 @@ REPOSITORY_URI="$(ssm_get "/${PROJECT_NAME}/${ENVIRONMENT}/storage/process-order
 IMAGE_TAG="${GIT_SHA}"
 IMAGE_URI="${REPOSITORY_URI}:${IMAGE_TAG}"
 
-AWS_REGION="$(aws configure get region)"
+AWS_REGION="${AWS_DEFAULT_REGION:-$(aws configure get region)}"
 aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${REPOSITORY_URI%%/*}"
 
+# Separate login for the public ECR gallery (public.ecr.aws), which the Dockerfile
+# pulls its base image from. This is a different registry from the private ECR
+# above, and its auth API is only served from us-east-1 regardless of deploy region.
+# Without this, docker build pulls anonymously and hits public ECR's low anonymous
+# rate limit, which surfaces as a 403 Forbidden on the base image pull.
+aws ecr-public get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin public.ecr.aws
+
 docker build \
+  --provenance=false --sbom=false \
   -f "${PROJECT_ROOT}/docker/Dockerfile.lambda" \
   -t "${IMAGE_URI}" \
   "${PROJECT_ROOT}"

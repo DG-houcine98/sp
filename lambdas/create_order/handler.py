@@ -8,6 +8,7 @@ enqueues its order_id on SQS for process_order to pick up.
 Only the order_id is sent on the queue (not the full payload) so DynamoDB
 stays the single source of truth and SQS messages stay small.
 """
+
 import json
 import os
 import uuid
@@ -21,7 +22,12 @@ REQUIRED_FIELDS = ("customer_id", "item", "quantity")
 def _response(status_code, body):
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
+        # Lambda proxy integration passes headers straight through - API Gateway
+        # won't add CORS headers on its own here, so the Lambda must set them.
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
         "body": json.dumps(body),
     }
 

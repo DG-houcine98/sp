@@ -11,6 +11,7 @@ this project's scale (single-node table, low item count) but does NOT scale:
 a production version would add a Global Secondary Index on `status` and
 Query it directly instead of scanning the whole table.
 """
+
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -22,7 +23,9 @@ STALE_AFTER_MINUTES = int(os.environ.get("STALE_AFTER_MINUTES", "60"))
 
 
 def _find_stale_orders(table):
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=STALE_AFTER_MINUTES)
+    ).isoformat()
 
     stale_orders = []
     scan_kwargs = {
@@ -45,5 +48,7 @@ def lambda_handler(event, context):
     for order in stale_orders:
         table.delete_item(Key={"order_id": order["order_id"]})
 
-    print(f"Deleted {len(stale_orders)} stale order(s) older than {STALE_AFTER_MINUTES} minutes")
+    print(
+        f"Deleted {len(stale_orders)} stale order(s) older than {STALE_AFTER_MINUTES} minutes"
+    )
     return {"deleted_count": len(stale_orders)}

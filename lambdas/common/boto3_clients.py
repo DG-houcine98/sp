@@ -9,6 +9,7 @@ All resource identifiers come from environment variables injected by
 CloudFormation (see cloudformation/04-compute-api.yaml) - never hardcode a
 table name, queue URL, or endpoint here.
 """
+
 import os
 
 import boto3

@@ -15,12 +15,21 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: order-processing-jenkins
+    # Jenkins uses hudson.lifecycle.ExitLifecycle in containers: a "safe restart"
+    # doesn't relaunch the JVM in-process, it exits with code 5 and expects the
+    # container orchestrator to bring it back up. Without this policy, Docker
+    # leaves the container dead after any plugin install that triggers a restart.
+    restart: unless-stopped
     ports:
       - "8080:8080"   # web UI
       - "50000:50000" # agent JNLP port (unused without a separate agent, kept for parity)
     volumes:
       - jenkins_home:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock
+      # Read-only mount of the project's local git repo, so the Jenkins job can
+      # check out from file:///workspace/serverless-project instead of GitHub -
+      # avoids needing a GitHub PAT credential just to run the pipeline locally.
+      - ..:/workspace/serverless-project:ro
     environment:
       # Lets the pipeline's `docker` CLI calls work without every user
       # separately fixing socket permissions inside the container.
