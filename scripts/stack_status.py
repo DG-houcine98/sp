@@ -7,6 +7,7 @@ smoke-test stage after a deploy - exits non-zero if any stack is not in a
 healthy *_COMPLETE state, so the pipeline can fail the build on it rather
 than silently continuing.
 """
+
 import sys
 
 import boto3
