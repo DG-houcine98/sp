@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         git zip unzip jq curl shellcheck \
         docker.io \
-        gcc \
+        build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # AWS CLI v2 (the Debian package only ships v1, which lacks some commands
