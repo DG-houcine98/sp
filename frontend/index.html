@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Order Processing - Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+    label { display: block; margin-top: 12px; font-size: 14px; }
+    input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    #result { margin-top: 20px; padding: 12px; border-radius: 4px; font-size: 14px; white-space: pre-wrap; }
+    .success { background: #e6f4ea; color: #1e4620; }
+    .error { background: #fce8e6; color: #611a15; }
+  </style>
+</head>
+<body>
+  <h1>Submit an order</h1>
+  <p>Minimal demo UI proving the end-to-end flow: this form &rarr; API Gateway &rarr; create_order Lambda &rarr; DynamoDB + SQS &rarr; process_order Lambda &rarr; SNS/OpenSearch.</p>
+
+  <form id="order-form">
+    <label>Customer ID<input id="customer_id" required></label>
+    <label>Item<input id="item" required></label>
+    <label>Quantity<input id="quantity" type="number" min="1" value="1" required></label>
+    <button type="submit">Submit order</button>
+  </form>
+
+  <div id="result" hidden></div>
+
+  <script>
+    // Substituted at deploy time by scripts/deploy_frontend.sh - not a real
+    // value until then, so submitting before that step will fail loudly.
+    const API_ENDPOINT = "__API_ENDPOINT__";
+
+    document.getElementById("order-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const resultEl = document.getElementById("result");
+      resultEl.hidden = false;
+      resultEl.className = "";
+      resultEl.textContent = "Submitting...";
+
+      const payload = {
+        customer_id: document.getElementById("customer_id").value,
+        item: document.getElementById("item").value,
+        quantity: Number(document.getElementById("quantity").value),
+      };
+
+      try {
+        const response = await fetch(API_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        resultEl.className = response.ok ? "success" : "error";
+        resultEl.textContent = JSON.stringify(body, null, 2);
+      } catch (err) {
+        resultEl.className = "error";
+        resultEl.textContent = `Request failed: ${err.message}`;
+      }
+    });
+  </script>
+</body>
+</html>

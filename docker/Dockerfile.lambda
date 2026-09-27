@@ -1,0 +1,28 @@
+# Multi-stage build for the process_order Lambda, packaged as a container
+# image instead of a zip (see cloudformation/04-compute-api.yaml).
+#
+# Must start from AWS's own Lambda base image (or one implementing the
+# Lambda Runtime API) - a container Lambda can't use an arbitrary slim base
+# like python:3.12-slim the way a typical web-service Dockerfile might. The
+# multi-stage optimization here is about what gets copied into the final
+# image (only installed deps + runtime code), not about the base image size.
+#
+# Build context must be the project root (see scripts/package_lambdas.sh),
+# since this needs both lambdas/process_order/ and lambdas/common/.
+
+# ---- Builder stage: install dependencies into a clean target directory ----
+FROM public.ecr.aws/lambda/python:3.12 AS builder
+
+COPY lambdas/process_order/requirements.txt /tmp/requirements.txt
+RUN mkdir -p /opt/python-deps \
+    && pip install --no-cache-dir -r /tmp/requirements.txt --target /opt/python-deps
+
+# ---- Final stage: only the installed deps + runtime code, nothing from the
+#      build toolchain (pip cache, wheel build artifacts, etc.) ----
+FROM public.ecr.aws/lambda/python:3.12
+
+COPY --from=builder /opt/python-deps ${LAMBDA_TASK_ROOT}
+COPY lambdas/process_order/handler.py ${LAMBDA_TASK_ROOT}/
+COPY lambdas/common ${LAMBDA_TASK_ROOT}/common
+
+CMD ["handler.lambda_handler"]

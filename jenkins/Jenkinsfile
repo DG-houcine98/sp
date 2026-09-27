@@ -1,0 +1,203 @@
+// Order Processing - declarative Jenkins pipeline.
+//
+// Agent-selection and rollback logic are plain Groovy functions defined here
+// rather than a Jenkins Shared Library (jenkins/vars/*.groovy) - a shared
+// library normally lives in its own Git repo registered in Jenkins' global
+// config, which would make this pipeline unrunnable without that extra setup.
+// Inlining keeps everything self-contained in this one repo.
+
+def deployedStacks = []
+
+// Picks the label of the connected agent with the most idle executors -
+// simple CPU/executor-based load balancing across agents.
+//
+// NOTE: Jenkins.instance is an internal Jenkins API call, not whitelisted by
+// the Groovy sandbox by default. The first time this pipeline runs, an admin
+// must approve this method signature via
+// "Manage Jenkins > In-process Script Approval" (or mark this function
+// @NonCPS and run the pipeline with the sandbox disabled). This is expected,
+// one-time setup - not a bug in the script.
+def selectAgent() {
+    def bestLabel = 'built-in'
+    def maxIdleExecutors = -1
+    Jenkins.instance.computers.each { computer ->
+        def label = computer.node.getLabelString()
+        if (computer.isOnline() && label?.trim()) {
+            def idle = computer.countIdle()
+            if (idle > maxIdleExecutors) {
+                maxIdleExecutors = idle
+                bestLabel = label
+            }
+        }
+    }
+    echo "Selected agent label '${bestLabel}' (${maxIdleExecutors} idle executors)"
+    return bestLabel
+}
+
+// Deletes stacks in reverse order of how they were deployed this run - called
+// from the post{failure{}} block so a failed deploy doesn't leave a
+// half-deployed environment behind.
+def rollbackStacks(environment, stacks) {
+    stacks.reverse().each { stackBasename ->
+        def stackName = "order-processing-${environment}-${stackBasename}"
+        echo "Rolling back: deleting ${stackName}"
+        sh "aws cloudformation delete-stack --stack-name ${stackName} || true"
+        sh "aws cloudformation wait stack-delete-complete --stack-name ${stackName} || true"
+    }
+}
+
+pipeline {
+    agent none
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'staging', 'prod'], description: 'Target environment')
+        booleanParam(name: 'FORCE_FROZEN', defaultValue: false, description: 'Bypass the pFrozen check (dangerous - prod only when intentional)')
+    }
+
+    environment {
+        AWS_CREDENTIALS_ID = "aws-${params.ENVIRONMENT}" // aws-dev / aws-staging / aws-prod, bound per-environment in Jenkins credentials
+        PYTHON_VENV = '.venv'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            agent { label selectAgent() }
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Lint') {
+            agent { label selectAgent() }
+            steps {
+                sh '''
+                    python3 -m venv ${PYTHON_VENV}
+                    . ${PYTHON_VENV}/bin/activate
+                    pip install -q -r requirements-dev.txt
+                '''
+                parallel(
+                    "cfn-lint": {
+                        sh '. ${PYTHON_VENV}/bin/activate && cfn-lint cloudformation/*.yaml'
+                    },
+                    "python-lint": {
+                        sh '''
+                            . ${PYTHON_VENV}/bin/activate
+                            flake8 lambdas/ scripts/
+                            black --check lambdas/ scripts/
+                        '''
+                    },
+                    "shellcheck": {
+                        sh 'shellcheck scripts/*.sh'
+                    }
+                )
+            }
+        }
+
+        stage('Security scan') {
+            agent { label selectAgent() }
+            steps {
+                sh '''
+                    . ${PYTHON_VENV}/bin/activate
+                    pip-audit -r requirements-dev.txt
+                    for req in lambdas/*/requirements.txt; do
+                        pip-audit -r "$req" || exit 1
+                    done
+                    checkov -d cloudformation/ --compact
+                '''
+            }
+        }
+
+        stage('Unit tests') {
+            agent { label selectAgent() }
+            steps {
+                sh '''
+                    . ${PYTHON_VENV}/bin/activate
+                    pytest tests/ -v
+                '''
+            }
+        }
+
+        stage('Package') {
+            agent { label selectAgent() }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: env.AWS_CREDENTIALS_ID]]) {
+                    sh 'chmod +x scripts/*.sh && scripts/package_lambdas.sh ${ENVIRONMENT}'
+                }
+            }
+        }
+
+        stage('Approve production deploy') {
+            when { expression { params.ENVIRONMENT == 'prod' } }
+            steps {
+                input message: "Deploy to PRODUCTION?", ok: "Deploy"
+            }
+        }
+
+        stage('Deploy') {
+            agent { label selectAgent() }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: env.AWS_CREDENTIALS_ID]]) {
+                    script {
+                        def forceFlag = params.FORCE_FROZEN ? '--force' : ''
+                        def stackOrder = ['00-network-iam', '01-storage', '02-messaging', '03-search', '04-compute-api', '05-frontend-cdn', '06-monitoring']
+                        stackOrder.each { stackBasename ->
+                            sh "scripts/deploy_stack.sh ${params.ENVIRONMENT} ${stackBasename} ${forceFlag}".trim()
+                            deployedStacks.add(stackBasename)
+                        }
+                        sh "scripts/deploy_frontend.sh ${params.ENVIRONMENT}"
+                    }
+                }
+            }
+        }
+
+        stage('Smoke test') {
+            agent { label selectAgent() }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: env.AWS_CREDENTIALS_ID]]) {
+                    sh '''
+                        . ${PYTHON_VENV}/bin/activate
+                        python3 scripts/stack_status.py ${ENVIRONMENT}
+                    '''
+                    script {
+                        def apiEndpoint = sh(
+                            script: "aws cloudformation describe-stacks --stack-name order-processing-${params.ENVIRONMENT}-04-compute-api --query \"Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue\" --output text",
+                            returnStdout: true
+                        ).trim()
+                        sh """
+                            curl -sf -X POST "${apiEndpoint}" \
+                                -H "Content-Type: application/json" \
+                                -d '{"customer_id":"jenkins-smoke-test","item":"widget","quantity":1}'
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Notify') {
+            agent { label selectAgent() }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: env.AWS_CREDENTIALS_ID]]) {
+                    sh """
+                        ALERTS_TOPIC_ARN=\$(aws cloudformation describe-stacks --stack-name order-processing-${params.ENVIRONMENT}-06-monitoring --query "Stacks[0].Outputs[?OutputKey=='AlertsTopicArn'].OutputValue" --output text)
+                        aws sns publish --topic-arn "\$ALERTS_TOPIC_ARN" \
+                            --subject "Order Processing deploy succeeded" \
+                            --message "Environment: ${params.ENVIRONMENT}, Build: ${env.BUILD_NUMBER}" || true
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                if (deployedStacks.size() > 0) {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: env.AWS_CREDENTIALS_ID]]) {
+                        rollbackStacks(params.ENVIRONMENT, deployedStacks)
+                    }
+                }
+            }
+        }
+    }
+}

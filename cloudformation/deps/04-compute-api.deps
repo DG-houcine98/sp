@@ -1,0 +1,21 @@
+# Maps this stack's CloudFormation parameters to SSM Parameter Store paths.
+# deploy_stack.sh reads this file, substitutes {env} with the target
+# environment, resolves each path via `aws ssm get-parameter`, and passes the
+# result as --parameter-overrides. Format: <CfnParamName>=<SsmPath>
+#
+# The artifacts/* paths are written by scripts/package_lambdas.sh, which
+# MUST run before this stack deploys.
+pCreateOrderRoleArn=/order-processing/{env}/iam/create-order-role-arn
+pProcessOrderRoleArn=/order-processing/{env}/iam/process-order-role-arn
+pIndexToOpenSearchRoleArn=/order-processing/{env}/iam/index-opensearch-role-arn
+pCleanupStaleOrdersRoleArn=/order-processing/{env}/iam/cleanup-orders-role-arn
+pArtifactsBucketName=/order-processing/{env}/storage/artifacts-bucket-name
+pOrdersTableName=/order-processing/{env}/storage/orders-table-name
+pOrdersQueueUrl=/order-processing/{env}/messaging/orders-queue-url
+pOrdersQueueArn=/order-processing/{env}/messaging/orders-queue-arn
+pOrdersTopicArn=/order-processing/{env}/messaging/orders-topic-arn
+pSearchDomainEndpoint=/order-processing/{env}/search/domain-endpoint
+pCreateOrderCodeKey=/order-processing/{env}/artifacts/create-order-code-key
+pIndexToOpenSearchCodeKey=/order-processing/{env}/artifacts/index-opensearch-code-key
+pCleanupStaleOrdersCodeKey=/order-processing/{env}/artifacts/cleanup-orders-code-key
+pProcessOrderImageUri=/order-processing/{env}/artifacts/process-order-image-uri

@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - IAM roles for each Lambda function (least privilege).
+  Deployed first: every other stack's compute resources reference these role ARNs
+  via SSM Parameter Store rather than creating their own roles.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+
+Resources:
+
+  # ---- create_order: API Gateway -> Lambda -> DynamoDB + SQS ----
+  CreateOrderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-create-order-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: create-order-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem]
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${pProjectName}-${pEnvironment}-orders"
+              - Effect: Allow
+                Action: [sqs:SendMessage]
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${pProjectName}-${pEnvironment}-orders-queue"
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParametersByPath]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/${pEnvironment}/*"
+
+  # ---- process_order: SQS -> Lambda -> SNS ----
+  ProcessOrderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-process-order-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: process-order-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${pProjectName}-${pEnvironment}-orders-queue"
+              - Effect: Allow
+                Action: [dynamodb:UpdateItem, dynamodb:GetItem]
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${pProjectName}-${pEnvironment}-orders"
+              - Effect: Allow
+                Action: [sns:Publish]
+                Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${pProjectName}-${pEnvironment}-orders-topic"
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParametersByPath]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/${pEnvironment}/*"
+
+  # ---- index_to_opensearch: DynamoDB Streams -> Lambda -> OpenSearch ----
+  IndexToOpenSearchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-index-opensearch-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: index-opensearch-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${pProjectName}-${pEnvironment}-orders/stream/*"
+              - Effect: Allow
+                Action: [es:ESHttpPost, es:ESHttpPut, es:ESHttpGet]
+                Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${pProjectName}-${pEnvironment}-search/*"
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParametersByPath]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/${pEnvironment}/*"
+
+  # ---- cleanup_stale_orders: EventBridge schedule -> Lambda -> DynamoDB scan/delete ----
+  CleanupStaleOrdersRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-cleanup-orders-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: cleanup-orders-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Scan, dynamodb:DeleteItem]
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${pProjectName}-${pEnvironment}-orders"
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParametersByPath]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${pProjectName}/${pEnvironment}/*"
+
+  # ---- Publish role ARNs to SSM so downstream stacks never hardcode/import them directly ----
+  CreateOrderRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/iam/create-order-role-arn"
+      Type: String
+      Value: !GetAtt CreateOrderRole.Arn
+
+  ProcessOrderRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/iam/process-order-role-arn"
+      Type: String
+      Value: !GetAtt ProcessOrderRole.Arn
+
+  IndexToOpenSearchRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/iam/index-opensearch-role-arn"
+      Type: String
+      Value: !GetAtt IndexToOpenSearchRole.Arn
+
+  CleanupStaleOrdersRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/iam/cleanup-orders-role-arn"
+      Type: String
+      Value: !GetAtt CleanupStaleOrdersRole.Arn
+
+Outputs:
+  CreateOrderRoleArn:
+    Value: !GetAtt CreateOrderRole.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-create-order-role-arn" }
+  ProcessOrderRoleArn:
+    Value: !GetAtt ProcessOrderRole.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-process-order-role-arn" }
+  IndexToOpenSearchRoleArn:
+    Value: !GetAtt IndexToOpenSearchRole.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-index-opensearch-role-arn" }
+  CleanupStaleOrdersRoleArn:
+    Value: !GetAtt CleanupStaleOrdersRole.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-cleanup-orders-role-arn" }

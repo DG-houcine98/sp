@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - compute layer: the 4 Lambda functions, their event
+  triggers (API Gateway, SQS, DynamoDB Stream, EventBridge schedule), and the
+  REST API. Deployed after 00-03 because it needs their role ARNs, resource
+  names/ARNs, and the packaged code already sitting in the artifacts bucket
+  (run scripts/package_lambdas.sh before this stack).
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+
+  # ---- Resolved by deploy_stack.sh from SSM/stack 00 outputs, passed in explicitly
+  #      so this stack has no hard CloudFormation dependency on stacks 00-03 ----
+  pCreateOrderRoleArn: { Type: String }
+  pProcessOrderRoleArn: { Type: String }
+  pIndexToOpenSearchRoleArn: { Type: String }
+  pCleanupStaleOrdersRoleArn: { Type: String }
+
+  pArtifactsBucketName: { Type: String }
+  pCreateOrderCodeKey: { Type: String, Description: "S3 key of create_order.zip" }
+  pIndexToOpenSearchCodeKey: { Type: String, Description: "S3 key of index_to_opensearch.zip" }
+  pCleanupStaleOrdersCodeKey: { Type: String, Description: "S3 key of cleanup_stale_orders.zip" }
+  pProcessOrderImageUri: { Type: String, Description: "ECR image URI for process_order (built via docker/Dockerfile.lambda)" }
+
+  pOrdersTableName: { Type: String }
+  pOrdersQueueUrl: { Type: String }
+  pOrdersQueueArn: { Type: String }
+  pOrdersTopicArn: { Type: String }
+  pSearchDomainEndpoint: { Type: String }
+
+  pCleanupScheduleExpression:
+    Type: String
+    Default: "rate(15 minutes)"
+
+Resources:
+
+  # ================= Lambda functions =================
+
+  CreateOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${pProjectName}-${pEnvironment}-create-order"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !Ref pCreateOrderRoleArn
+      Timeout: 15
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref pArtifactsBucketName
+        S3Key: !Ref pCreateOrderCodeKey
+      Environment:
+        Variables:
+          ORDERS_TABLE_NAME: !Ref pOrdersTableName
+          ORDERS_QUEUE_URL: !Ref pOrdersQueueUrl
+          ENVIRONMENT: !Ref pEnvironment
+          PROJECT_NAME: !Ref pProjectName
+
+  # Packaged as a container image (not a zip) to demonstrate the Docker
+  # multi-stage build path alongside the zip-based Lambdas below.
+  ProcessOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${pProjectName}-${pEnvironment}-process-order"
+      PackageType: Image
+      Role: !Ref pProcessOrderRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        ImageUri: !Ref pProcessOrderImageUri
+      Environment:
+        Variables:
+          ORDERS_TABLE_NAME: !Ref pOrdersTableName
+          ORDERS_TOPIC_ARN: !Ref pOrdersTopicArn
+          ENVIRONMENT: !Ref pEnvironment
+          PROJECT_NAME: !Ref pProjectName
+
+  IndexToOpenSearchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${pProjectName}-${pEnvironment}-index-opensearch"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !Ref pIndexToOpenSearchRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref pArtifactsBucketName
+        S3Key: !Ref pIndexToOpenSearchCodeKey
+      Environment:
+        Variables:
+          SEARCH_DOMAIN_ENDPOINT: !Ref pSearchDomainEndpoint
+          ENVIRONMENT: !Ref pEnvironment
+          PROJECT_NAME: !Ref pProjectName
+
+  CleanupStaleOrdersFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${pProjectName}-${pEnvironment}-cleanup-stale-orders"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !Ref pCleanupStaleOrdersRoleArn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref pArtifactsBucketName
+        S3Key: !Ref pCleanupStaleOrdersCodeKey
+      Environment:
+        Variables:
+          ORDERS_TABLE_NAME: !Ref pOrdersTableName
+          ENVIRONMENT: !Ref pEnvironment
+          PROJECT_NAME: !Ref pProjectName
+
+  # ================= Event source mappings / triggers =================
+
+  ProcessOrderQueueMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref pOrdersQueueArn
+      FunctionName: !Ref ProcessOrderFunction
+      BatchSize: 10
+      FunctionResponseTypes: [ReportBatchItemFailures] # lets a partial-batch failure retry only the failed messages
+
+  IndexToOpenSearchStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Sub "{{resolve:ssm:/${pProjectName}/${pEnvironment}/storage/orders-table-stream-arn}}"
+      FunctionName: !Ref IndexToOpenSearchFunction
+      StartingPosition: LATEST
+      BatchSize: 10
+
+  CleanupScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${pProjectName}-${pEnvironment}-cleanup-stale-orders-schedule"
+      Description: Periodically triggers the cleanup_stale_orders Lambda.
+      ScheduleExpression: !Ref pCleanupScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: CleanupStaleOrdersTarget
+          Arn: !GetAtt CleanupStaleOrdersFunction.Arn
+
+  CleanupScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CleanupStaleOrdersFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CleanupScheduleRule.Arn
+
+  # ================= API Gateway =================
+
+  OrdersApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${pProjectName}-${pEnvironment}-orders-api"
+      EndpointConfiguration: { Types: [REGIONAL] }
+
+  OrdersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrdersApi
+      ParentId: !GetAtt OrdersApi.RootResourceId
+      PathPart: orders
+
+  CreateOrderMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersApi
+      ResourceId: !Ref OrdersResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateOrderFunction.Arn}/invocations"
+
+  CreateOrderApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateOrderFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrdersApi}/*/POST/orders"
+
+  OrdersApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: CreateOrderMethod
+    Properties:
+      RestApiId: !Ref OrdersApi
+
+  OrdersApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref OrdersApi
+      DeploymentId: !Ref OrdersApiDeployment
+      StageName: !Ref pEnvironment
+
+  # ---- Mirror function names to SSM - 06-monitoring.yaml needs these as
+  #      CloudWatch metric dimensions, and they're not otherwise resolvable
+  #      without a hard CloudFormation dependency on this stack's exports. ----
+  CreateOrderFunctionNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/compute/create-order-function-name"
+      Type: String
+      Value: !Ref CreateOrderFunction
+
+  ProcessOrderFunctionNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/compute/process-order-function-name"
+      Type: String
+      Value: !Ref ProcessOrderFunction
+
+  IndexToOpenSearchFunctionNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/compute/index-opensearch-function-name"
+      Type: String
+      Value: !Ref IndexToOpenSearchFunction
+
+  CleanupStaleOrdersFunctionNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/compute/cleanup-orders-function-name"
+      Type: String
+      Value: !Ref CleanupStaleOrdersFunction
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub "https://${OrdersApi}.execute-api.${AWS::Region}.amazonaws.com/${pEnvironment}/orders"
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-api-endpoint" }
+  CreateOrderFunctionArn:
+    Value: !GetAtt CreateOrderFunction.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-create-order-fn-arn" }
+  ProcessOrderFunctionArn:
+    Value: !GetAtt ProcessOrderFunction.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-process-order-fn-arn" }
+  IndexToOpenSearchFunctionArn:
+    Value: !GetAtt IndexToOpenSearchFunction.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-index-opensearch-fn-arn" }
+  CleanupStaleOrdersFunctionArn:
+    Value: !GetAtt CleanupStaleOrdersFunction.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-cleanup-orders-fn-arn" }

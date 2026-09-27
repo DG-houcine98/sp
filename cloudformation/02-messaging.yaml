@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - messaging layer: SQS queue (+ DLQ) between create_order and
+  process_order, and the SNS topic for completion notifications.
+  The EventBridge schedule for cleanup_stale_orders lives in 04-compute-api.yaml
+  instead of here, because a Rule's Targets are a property of the Rule resource
+  itself - CloudFormation has no way to attach a target to a Rule owned by a
+  different stack, so the rule has to be defined in the same stack as the Lambda
+  it invokes.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+
+Resources:
+
+  OrdersDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${pProjectName}-${pEnvironment}-orders-queue-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days, max retention - give time to investigate failures
+
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${pProjectName}-${pEnvironment}-orders-queue"
+      VisibilityTimeout: 60 # must exceed process_order's Lambda timeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDeadLetterQueue.Arn
+        maxReceiveCount: 3 # after 3 failed attempts, message moves to the DLQ instead of looping forever
+
+  OrdersTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${pProjectName}-${pEnvironment}-orders-topic"
+      # No subscriptions defined here - add via `aws sns subscribe` or a
+      # separate stack/parameter once you know the endpoint (email, Slack webhook, etc.)
+
+  # ---- Mirror to SSM ----
+  OrdersQueueUrlParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/messaging/orders-queue-url"
+      Type: String
+      Value: !Ref OrdersQueue
+
+  OrdersQueueArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/messaging/orders-queue-arn"
+      Type: String
+      Value: !GetAtt OrdersQueue.Arn
+
+  OrdersQueueNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/messaging/orders-queue-name"
+      Type: String
+      Value: !GetAtt OrdersQueue.QueueName
+
+  OrdersTopicArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/messaging/orders-topic-arn"
+      Type: String
+      Value: !Ref OrdersTopic
+
+Outputs:
+  OrdersQueueUrl:
+    Value: !Ref OrdersQueue
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-queue-url" }
+  OrdersQueueArn:
+    Value: !GetAtt OrdersQueue.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-queue-arn" }
+  OrdersQueueName:
+    Value: !GetAtt OrdersQueue.QueueName
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-queue-name" }
+  OrdersDeadLetterQueueArn:
+    Value: !GetAtt OrdersDeadLetterQueue.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-dlq-arn" }
+  OrdersTopicArn:
+    Value: !Ref OrdersTopic
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-topic-arn" }

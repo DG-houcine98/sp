@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - CloudFront distribution serving the static frontend from
+  the private FrontendBucket (01-storage.yaml), using Origin Access Control
+  (OAC) rather than a public bucket policy or the legacy S3 website-hosting
+  endpoint - this is the current AWS-recommended pattern for a private S3
+  origin.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+  pFrontendBucketName: { Type: String, Description: "Resolved from SSM by deploy_stack.sh" }
+  pFrontendBucketRegionalDomainName: { Type: String, Description: "e.g. <bucket>.s3.<region>.amazonaws.com" }
+
+Resources:
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${pProjectName}-${pEnvironment}-frontend-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "${pProjectName}-${pEnvironment}-frontend"
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100 # cheapest tier (NA/EU edge locations only) - fine for a learning project
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !Ref pFrontendBucketRegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: "" # required field, left empty - OAC replaces the legacy OAI mechanism
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # AWS managed "CachingOptimized" policy
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html # SPA-style fallback so client-side routes don't 403 on refresh
+
+  # Grants only this specific distribution (via SourceArn condition) read access -
+  # the bucket itself stays fully private otherwise.
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref pFrontendBucketName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${pFrontendBucketName}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+  FrontendDistributionIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/frontend/distribution-id"
+      Type: String
+      Value: !Ref FrontendDistribution
+
+  FrontendDistributionDomainParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/frontend/distribution-domain"
+      Type: String
+      Value: !GetAtt FrontendDistribution.DomainName
+
+Outputs:
+  DistributionId:
+    Value: !Ref FrontendDistribution
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-frontend-distribution-id" }
+  DistributionDomainName:
+    Value: !GetAtt FrontendDistribution.DomainName
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-frontend-distribution-domain" }

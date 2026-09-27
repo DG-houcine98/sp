@@ -1,0 +1,9 @@
+# Maps this stack's CloudFormation parameters to SSM Parameter Store paths.
+# deploy_stack.sh reads this file, substitutes {env} with the target
+# environment, resolves each path via `aws ssm get-parameter`, and passes the
+# result as --parameter-overrides. Format: <CfnParamName>=<SsmPath>
+pCreateOrderFunctionName=/order-processing/{env}/compute/create-order-function-name
+pProcessOrderFunctionName=/order-processing/{env}/compute/process-order-function-name
+pIndexToOpenSearchFunctionName=/order-processing/{env}/compute/index-opensearch-function-name
+pCleanupStaleOrdersFunctionName=/order-processing/{env}/compute/cleanup-orders-function-name
+pOrdersQueueName=/order-processing/{env}/messaging/orders-queue-name

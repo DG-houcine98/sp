@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - monitoring layer: a dedicated AlertsTopic (separate from
+  the business-facing orders-topic in 02-messaging.yaml) so operational alarms
+  don't mix with order-completion notifications, CloudWatch alarms on Lambda
+  errors and SQS queue depth, and a dashboard grouping them.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+  pCreateOrderFunctionName: { Type: String }
+  pProcessOrderFunctionName: { Type: String }
+  pIndexToOpenSearchFunctionName: { Type: String }
+  pCleanupStaleOrdersFunctionName: { Type: String }
+  pOrdersQueueName: { Type: String, Description: "Queue name (not URL/ARN) - required as the CloudWatch metric dimension" }
+
+Resources:
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${pProjectName}-${pEnvironment}-alerts-topic"
+      # Subscribe your own email/Slack endpoint later, same as orders-topic.
+
+  CreateOrderErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${pProjectName}-${pEnvironment}-create-order-errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref pCreateOrderFunctionName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  ProcessOrderErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${pProjectName}-${pEnvironment}-process-order-errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref pProcessOrderFunctionName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  IndexToOpenSearchErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${pProjectName}-${pEnvironment}-index-opensearch-errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref pIndexToOpenSearchFunctionName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  CleanupStaleOrdersErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${pProjectName}-${pEnvironment}-cleanup-orders-errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref pCleanupStaleOrdersFunctionName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  # Catches process_order falling behind (e.g. stuck on OpenSearch/SNS calls) -
+  # messages piling up in the queue before they ever hit the DLQ.
+  OrdersQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${pProjectName}-${pEnvironment}-orders-queue-depth"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !Ref pOrdersQueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  OrdersDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${pProjectName}-${pEnvironment}-orders-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Errors (Sum)",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${pCreateOrderFunctionName}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${pProcessOrderFunctionName}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${pIndexToOpenSearchFunctionName}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${pCleanupStaleOrdersFunctionName}"]
+                ],
+                "stat": "Sum", "period": 300, "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Orders Queue Depth",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${pOrdersQueueName}"]
+                ],
+                "stat": "Maximum", "period": 300, "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  AlertsTopicArn:
+    Value: !Ref AlertsTopic
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-alerts-topic-arn" }
+  DashboardName:
+    Value: !Ref OrdersDashboard
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-dashboard-name" }

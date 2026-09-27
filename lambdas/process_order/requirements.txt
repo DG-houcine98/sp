@@ -1,0 +1,1 @@
+# boto3 is provided by the Lambda Python base image - not bundled here.

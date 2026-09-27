@@ -1,0 +1,16 @@
+# Dev/test/lint dependencies - NOT deployed with any Lambda. Each lambdas/*/requirements.txt
+# lists only what that function needs at runtime.
+
+boto3==1.34.25  # pinned to match checkov's exact requirement below; moto only needs >=1.9.201, so this satisfies both
+opensearch-py==2.6.0
+requests==2.32.3
+
+pytest==8.2.2
+moto[dynamodb,sqs,sns]==5.0.9
+
+flake8==7.1.0
+black==24.4.2
+
+cfn-lint==1.10.3
+checkov==3.2.147
+pip-audit==2.7.3

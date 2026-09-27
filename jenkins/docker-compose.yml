@@ -1,0 +1,31 @@
+# Runs Jenkins locally for this project. No separate agent container - the
+# controller's own built-in node executes the pipeline, which is why
+# Jenkinsfile's selectAgent() will only ever see one real candidate in this
+# local setup (see docs/architecture.md for the production-scale version of
+# that logic).
+#
+# The pipeline's Package stage runs `docker build`/`docker push`. Rather than
+# running a full Docker daemon inside this container (dind, needs
+# --privileged), we mount the HOST's Docker socket - "Docker-outside-of-
+# Docker". Any image built by the pipeline is a sibling container on your
+# Mac's own Docker daemon, not a child of this Jenkins container.
+services:
+  jenkins:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: order-processing-jenkins
+    ports:
+      - "8080:8080"   # web UI
+      - "50000:50000" # agent JNLP port (unused without a separate agent, kept for parity)
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Lets the pipeline's `docker` CLI calls work without every user
+      # separately fixing socket permissions inside the container.
+      - DOCKER_GID=0
+    user: root
+
+volumes:
+  jenkins_home:

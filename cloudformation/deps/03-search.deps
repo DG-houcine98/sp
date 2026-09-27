@@ -1,0 +1,5 @@
+# Maps this stack's CloudFormation parameters to SSM Parameter Store paths.
+# deploy_stack.sh reads this file, substitutes {env} with the target
+# environment, resolves each path via `aws ssm get-parameter`, and passes the
+# result as --parameter-overrides. Format: <CfnParamName>=<SsmPath>
+pIndexerRoleArn=/order-processing/{env}/iam/index-opensearch-role-arn

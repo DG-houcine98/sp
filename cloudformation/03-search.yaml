@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - OpenSearch domain used by index_to_opensearch to index orders
+  for search/analytics. Sized minimally for a learning project (single t3.small
+  node, no dedicated master, no multi-AZ) - tear down with cleanup_resources.sh
+  when not actively testing, since this runs 24/7 while it exists.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+  pIndexerRoleArn:
+    Type: String
+    Description: >
+      ARN of the IndexToOpenSearchRole from 00-network-iam.yaml. Passed as a
+      parameter (resolved from SSM by the deploy script) rather than imported,
+      so this stack has no hard CloudFormation dependency on stack 00's exports.
+  pAdminPrincipalArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional IAM user/role ARN (yours) granted access for manual queries via
+      the OpenSearch Dashboards UI. Leave blank to skip.
+
+Conditions:
+  HasAdminPrincipal: !Not [!Equals [!Ref pAdminPrincipalArn, ""]]
+
+Resources:
+
+  SearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Sub "${pProjectName}-${pEnvironment}-search"
+      EngineVersion: OpenSearch_2.11
+      ClusterConfig:
+        InstanceType: t3.small.search
+        InstanceCount: 1
+        DedicatedMasterEnabled: false
+        ZoneAwarenessEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp3
+        VolumeSize: 10
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If
+                - HasAdminPrincipal
+                - [!Ref pIndexerRoleArn, !Ref pAdminPrincipalArn]
+                - [!Ref pIndexerRoleArn]
+            Action: "es:*"
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${pProjectName}-${pEnvironment}-search/*"
+
+  SearchDomainEndpointParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/search/domain-endpoint"
+      Type: String
+      Value: !GetAtt SearchDomain.DomainEndpoint
+
+  SearchDomainArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/search/domain-arn"
+      Type: String
+      Value: !GetAtt SearchDomain.Arn
+
+Outputs:
+  SearchDomainEndpoint:
+    Value: !GetAtt SearchDomain.DomainEndpoint
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-search-domain-endpoint" }
+  SearchDomainArn:
+    Value: !GetAtt SearchDomain.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-search-domain-arn" }

@@ -1,0 +1,6 @@
+{
+  "pEnvironment": "dev",
+  "pProjectName": "order-processing",
+  "pFrozen": "false",
+  "pCleanupScheduleExpression": "rate(15 minutes)"
+}

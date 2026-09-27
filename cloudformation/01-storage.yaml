@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Processing - storage layer: DynamoDB orders table (with Stream for the
+  OpenSearch indexer), S3 buckets for the frontend site and Lambda artifacts,
+  and the ECR repository for the process_order container-image Lambda.
+
+Parameters:
+  pEnvironment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  pProjectName:
+    Type: String
+    Default: order-processing
+
+Resources:
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${pProjectName}-${pEnvironment}-orders"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+
+  # Deployment artifacts bucket: package_lambdas.sh uploads zips here before deploy.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${pProjectName}-${pEnvironment}-artifacts-${AWS::AccountId}"
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+
+  # Static frontend origin bucket. No public bucket policy - CloudFront reaches it
+  # via Origin Access Control (configured in 05-frontend-cdn.yaml), which is the
+  # current AWS-recommended pattern over legacy public static-website-hosting.
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${pProjectName}-${pEnvironment}-frontend-${AWS::AccountId}"
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  # Holds the process_order container image. Created here (rather than by
+  # package_lambdas.sh calling `aws ecr create-repository`) so all
+  # infrastructure provisioning stays inside CloudFormation - the script only
+  # ever reads this repo's URI.
+  ProcessOrderRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${pProjectName}-${pEnvironment}-process-order"
+      # Without this, CloudFormation refuses to delete the repository once
+      # package_lambdas.sh has pushed any image into it, and this stack's
+      # deletion (scripts/cleanup_resources.sh) would fail on this resource.
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the 10 most recent images",
+                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10 },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---- Mirror everything to SSM so downstream stacks/scripts/Lambda code never hardcode names ----
+  OrdersTableNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/orders-table-name"
+      Type: String
+      Value: !Ref OrdersTable
+
+  OrdersTableStreamArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/orders-table-stream-arn"
+      Type: String
+      Value: !GetAtt OrdersTable.StreamArn
+
+  ArtifactsBucketNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/artifacts-bucket-name"
+      Type: String
+      Value: !Ref ArtifactsBucket
+
+  FrontendBucketNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/frontend-bucket-name"
+      Type: String
+      Value: !Ref FrontendBucket
+
+  FrontendBucketRegionalDomainParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/frontend-bucket-regional-domain"
+      Type: String
+      Value: !GetAtt FrontendBucket.RegionalDomainName
+
+  ProcessOrderRepositoryUriParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${pProjectName}/${pEnvironment}/storage/process-order-repository-uri"
+      Type: String
+      Value: !GetAtt ProcessOrderRepository.RepositoryUri
+
+Outputs:
+  OrdersTableName:
+    Value: !Ref OrdersTable
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-table-name" }
+  OrdersTableStreamArn:
+    Value: !GetAtt OrdersTable.StreamArn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-orders-table-stream-arn" }
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-artifacts-bucket-name" }
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-frontend-bucket-name" }
+  FrontendBucketArn:
+    Value: !GetAtt FrontendBucket.Arn
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-frontend-bucket-arn" }
+  FrontendBucketRegionalDomainName:
+    Value: !GetAtt FrontendBucket.RegionalDomainName
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-frontend-bucket-regional-domain" }
+  ProcessOrderRepositoryUri:
+    Value: !GetAtt ProcessOrderRepository.RepositoryUri
+    Export: { Name: !Sub "${pProjectName}-${pEnvironment}-process-order-repo-uri" }

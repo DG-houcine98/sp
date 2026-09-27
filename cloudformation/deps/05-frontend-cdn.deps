@@ -1,0 +1,6 @@
+# Maps this stack's CloudFormation parameters to SSM Parameter Store paths.
+# deploy_stack.sh reads this file, substitutes {env} with the target
+# environment, resolves each path via `aws ssm get-parameter`, and passes the
+# result as --parameter-overrides. Format: <CfnParamName>=<SsmPath>
+pFrontendBucketName=/order-processing/{env}/storage/frontend-bucket-name
+pFrontendBucketRegionalDomainName=/order-processing/{env}/storage/frontend-bucket-regional-domain
