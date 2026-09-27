@@ -14,8 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # AWS CLI v2 (the Debian package only ships v1, which lacks some commands
-# this project's scripts rely on).
-RUN curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+# this project's scripts rely on). AWS ships separate x86_64/aarch64 builds -
+# hardcoding x86_64 silently "works" via QEMU emulation on an arm64 host (like
+# Apple Silicon via Colima) right up until some transitive piece of it needs a
+# library QEMU's user-mode emulation doesn't have, e.g. the x86_64 dynamic
+# linker itself. Detecting the real arch avoids emulation entirely.
+RUN ARCH="$(uname -m)" \
+    && curl -s "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscliv2.zip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
     && rm -rf /tmp/awscliv2.zip /tmp/aws
