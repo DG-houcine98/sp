@@ -35,8 +35,6 @@ flowchart LR
     subgraph Search
         Indexer["index_to_opensearch\nLambda"]
         OS[("OpenSearch\norders index")]
-        Cognito["Cognito User Pool\n+ Identity Pool"]
-        Dashboards(["OpenSearch\nDashboards"])
     end
 
     subgraph Scheduled
@@ -58,7 +56,6 @@ flowchart LR
     ProcessOrder --> DDB
     ProcessOrder --> Topic
     DDB -->|stream| Indexer --> OS
-    Cognito -->|login| Dashboards --> OS
     EventBridge --> Cleanup --> DDB
     CreateOrder & ProcessOrder & Indexer & Cleanup -.->|errors/metrics| CW --> Alerts
 ```
