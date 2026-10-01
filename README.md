@@ -42,11 +42,6 @@ flowchart LR
         Cleanup["cleanup_stale_orders\nLambda"]
     end
 
-    subgraph Monitoring
-        CW["CloudWatch\nalarms + dashboard"]
-        Alerts(["SNS\nalerts topic"])
-    end
-
     User -->|loads site| CF --> S3F
     User -->|submits order| APIGW --> CreateOrder
     CreateOrder --> DDB
@@ -57,7 +52,6 @@ flowchart LR
     ProcessOrder --> Topic
     DDB -->|stream| Indexer --> OS
     EventBridge --> Cleanup --> DDB
-    CreateOrder & ProcessOrder & Indexer & Cleanup -.->|errors/metrics| CW --> Alerts
 ```
 
 ## Prerequisites
