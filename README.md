@@ -7,6 +7,62 @@ Python/boto3, Bash, Docker, and pipeline-level security/quality gates.
 See [docs/architecture.md](docs/architecture.md) for the data flow, IAM design, and a list of
 deliberate simplifications made for a learning-scale project.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    User(["Browser"])
+
+    subgraph Frontend
+        CF["CloudFront"]
+        S3F["S3 (frontend)"]
+    end
+
+    subgraph API
+        APIGW["API Gateway\nPOST /orders"]
+        CreateOrder["create_order\nLambda"]
+    end
+
+    subgraph Data
+        DDB[("DynamoDB\norders table")]
+        Queue(["SQS\norders queue"])
+        DLQ(["SQS DLQ"])
+    end
+
+    ProcessOrder["process_order\nLambda (container)"]
+    Topic(["SNS\norders topic"])
+
+    subgraph Search
+        Indexer["index_to_opensearch\nLambda"]
+        OS[("OpenSearch\norders index")]
+        Cognito["Cognito User Pool\n+ Identity Pool"]
+        Dashboards(["OpenSearch\nDashboards"])
+    end
+
+    subgraph Scheduled
+        EventBridge["EventBridge\nrate(15 min)"]
+        Cleanup["cleanup_stale_orders\nLambda"]
+    end
+
+    subgraph Monitoring
+        CW["CloudWatch\nalarms + dashboard"]
+        Alerts(["SNS\nalerts topic"])
+    end
+
+    User -->|loads site| CF --> S3F
+    User -->|submits order| APIGW --> CreateOrder
+    CreateOrder --> DDB
+    CreateOrder --> Queue
+    Queue -->|triggers, 3 retries| ProcessOrder
+    Queue -.->|after 3 failures| DLQ
+    ProcessOrder --> DDB
+    ProcessOrder --> Topic
+    DDB -->|stream| Indexer --> OS
+    Cognito -->|login| Dashboards --> OS
+    EventBridge --> Cleanup --> DDB
+    CreateOrder & ProcessOrder & Indexer & Cleanup -.->|errors/metrics| CW --> Alerts
+```
+
 ## Prerequisites
 
 - AWS account + AWS CLI v2, configured with credentials that can create IAM roles, Lambda,

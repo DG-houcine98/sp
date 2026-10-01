@@ -2,5 +2,8 @@
   "pEnvironment": "dev",
   "pProjectName": "order-processing",
   "pFrozen": "false",
-  "pCleanupScheduleExpression": "rate(15 minutes)"
+  "pCleanupScheduleExpression": "rate(15 minutes)",
+  "pAdminPrincipalArn": "arn:aws:iam::369042512949:user/lahoucine_cli",
+  "pCognitoUserPoolId": "eu-west-2_XdfN3g7Mo",
+  "pCognitoUserPoolClientId": "5ifiij5357693m712qsq9f0cit"
 }

@@ -24,11 +24,107 @@ Parameters:
     Description: >
       Optional IAM user/role ARN (yours) granted access for manual queries via
       the OpenSearch Dashboards UI. Leave blank to skip.
+  pCognitoUserPoolId:
+    Type: String
+    Default: ""
+    Description: >
+      Optional existing Cognito User Pool ID, for logging into OpenSearch
+      Dashboards with real username/password auth instead of IAM/SigV4 (which
+      a browser can't do - plain browser requests to Dashboards show up to
+      OpenSearch as "anonymous" without this). Leave blank to skip; the domain
+      then only accepts signed requests from pIndexerRoleArn/pAdminPrincipalArn.
+  pCognitoUserPoolClientId:
+    Type: String
+    Default: ""
+    Description: App client ID on pCognitoUserPoolId, used to federate it into a new Identity Pool.
 
 Conditions:
   HasAdminPrincipal: !Not [!Equals [!Ref pAdminPrincipalArn, ""]]
+  EnableCognitoAuth: !Not [!Equals [!Ref pCognitoUserPoolId, ""]]
 
 Resources:
+
+  # ---- Cognito-backed Dashboards login (only created if pCognitoUserPoolId is set) ----
+  # OpenSearch requires the User Pool to have a Hosted UI domain - Dashboards
+  # redirects here for the actual OAuth login screen. A User Pool used only via
+  # direct API calls (e.g. Amplify's InitiateAuth, no Hosted UI) won't have one
+  # by default; adding it is additive and doesn't affect that other app's
+  # existing login flow.
+  DashboardsUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Condition: EnableCognitoAuth
+    Properties:
+      Domain: !Sub "${pProjectName}-${pEnvironment}-${AWS::AccountId}"
+      UserPoolId: !Ref pCognitoUserPoolId
+
+  # OpenSearch's CognitoOptions needs an Identity Pool, not just a User Pool - the
+  # User Pool handles login, the Identity Pool exchanges that login for AWS
+  # credentials (via its "authenticated" role below) that Dashboards actually
+  # signs its OpenSearch API calls with.
+  DashboardsIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Condition: EnableCognitoAuth
+    Properties:
+      IdentityPoolName: !Sub "${pProjectName}_${pEnvironment}_dashboards"
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref pCognitoUserPoolClientId
+          ProviderName: !Sub "cognito-idp.${AWS::Region}.amazonaws.com/${pCognitoUserPoolId}"
+
+  # Role assumed by anyone who logs into the User Pool and is federated through
+  # the Identity Pool above - this is the identity Dashboards actually uses to
+  # call the OpenSearch API, so it must also appear in SearchDomain's AccessPolicies.
+  DashboardsAuthRole:
+    Type: AWS::IAM::Role
+    Condition: EnableCognitoAuth
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-dashboards-auth-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals: { "cognito-identity.amazonaws.com:aud": !Ref DashboardsIdentityPool }
+              "ForAnyValue:StringLike": { "cognito-identity.amazonaws.com:amr": authenticated }
+      Policies:
+        - PolicyName: dashboards-es-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "es:ESHttp*"
+                Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${pProjectName}-${pEnvironment}-search/*"
+
+  DashboardsIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Condition: EnableCognitoAuth
+    Properties:
+      IdentityPoolId: !Ref DashboardsIdentityPool
+      Roles:
+        authenticated: !GetAtt DashboardsAuthRole.Arn
+
+  # Separate from DashboardsAuthRole above - this is the role the OpenSearch
+  # *service itself* assumes to call Cognito's DescribeUserPool/DescribeIdentityPool
+  # APIs on your behalf when wiring up the login flow.
+  OpenSearchCognitoServiceRole:
+    Type: AWS::IAM::Role
+    Condition: EnableCognitoAuth
+    # Same condition as DashboardsUserPoolDomain, so this DependsOn is valid -
+    # SearchDomain already implicitly depends on this role via CognitoOptions
+    # below, which chains the ordering through to the domain too.
+    DependsOn: DashboardsUserPoolDomain
+    Properties:
+      RoleName: !Sub "${pProjectName}-${pEnvironment}-opensearch-cognito-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: es.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonOpenSearchServiceCognitoAccess
 
   SearchDomain:
     Type: AWS::OpenSearchService::Domain
@@ -50,15 +146,28 @@ Resources:
         Enabled: true
       DomainEndpointOptions:
         EnforceHTTPS: true
+      CognitoOptions: !If
+        - EnableCognitoAuth
+        - Enabled: true
+          UserPoolId: !Ref pCognitoUserPoolId
+          IdentityPoolId: !Ref DashboardsIdentityPool
+          RoleArn: !GetAtt OpenSearchCognitoServiceRole.Arn
+        - !Ref AWS::NoValue
       AccessPolicies:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
               AWS: !If
-                - HasAdminPrincipal
-                - [!Ref pIndexerRoleArn, !Ref pAdminPrincipalArn]
-                - [!Ref pIndexerRoleArn]
+                - EnableCognitoAuth
+                - !If
+                  - HasAdminPrincipal
+                  - [!Ref pIndexerRoleArn, !Ref pAdminPrincipalArn, !GetAtt DashboardsAuthRole.Arn]
+                  - [!Ref pIndexerRoleArn, !GetAtt DashboardsAuthRole.Arn]
+                - !If
+                  - HasAdminPrincipal
+                  - [!Ref pIndexerRoleArn, !Ref pAdminPrincipalArn]
+                  - [!Ref pIndexerRoleArn]
             Action: "es:*"
             Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${pProjectName}-${pEnvironment}-search/*"
 
